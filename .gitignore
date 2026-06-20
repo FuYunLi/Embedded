@@ -1,0 +1,14 @@
+# Obsidian 本地缓存与工作区
+.obsidian/workspace*
+.obsidian/cache*
+.obsidian/plugins/
+.trash/
+
+# 系统文件
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 链接的子代码仓库
+/02代码库/
+
