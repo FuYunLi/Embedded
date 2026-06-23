@@ -2,5 +2,6 @@
   "attachmentFolderPath": "90-Meta_System/Attachments",
   "userIgnoreFilters": [
     "05-Code/"
-  ]
+  ],
+  "showUnsupportedFiles": true
 }
