@@ -159,6 +159,92 @@ HAL_GPIO_Init(GPIOB, &gpio);
 
 ---
 
+## 3. 深度补充：DMA 描述符环形队列的完整初始化代码流程
+
+仅仅看描述符的结构体定义并不足够。我们来完整走一遍在 C 语言中如何从零初始化一条包含 4 个节点的**接收描述符环形队列**，彻底理解指针如何构成"环"。
+
+```c
+/* 全局声明：4 个描述符 + 4 个静态接收缓冲区 */
+#define RX_DESC_NUM  4
+#define ETH_RX_BUF_SIZE  1524   /* 大于最大帧长 1518 字节 */
+
+struct eth_rx_desc rx_desc_ring[RX_DESC_NUM];
+uint8_t rx_buffer[RX_DESC_NUM][ETH_RX_BUF_SIZE];
+
+void eth_dma_rx_desc_init(void)
+{
+    for (int i = 0; i < RX_DESC_NUM; i++)
+    {
+        /* 1. OWN 位置 1：将缓冲区控制权交给 DMA，允许 DMA 写入 */
+        rx_desc_ring[i].status = ETH_DMARxDesc_OWN;
+        
+        /* 2. 绑定静态缓冲区地址 */
+        rx_desc_ring[i].buf1_addr = rx_buffer[i];
+        
+        /* 3. 配置缓冲区大小（不能超过硬件允许的最大值） */
+        rx_desc_ring[i].control = ETH_RX_BUF_SIZE;
+        
+        /* 4. 构成环形链：最后一个节点指向第 0 个节点，形成"环" */
+        if (i < RX_DESC_NUM - 1)
+        {
+            rx_desc_ring[i].next = &rx_desc_ring[i + 1];
+        }
+        else
+        {
+            /* 最后一个节点：next 绕回起始，同时设置"环形链"标志位 */
+            rx_desc_ring[i].next = &rx_desc_ring[0];
+            rx_desc_ring[i].control |= ETH_DMARxDesc_RER; /* 链末标志 */
+        }
+    }
+    
+    /* 5. 将描述符起始地址写入 DMA 寄存器 */
+    ETH->DMARDLAR = (uint32_t)rx_desc_ring;
+}
+```
+
+**关键细节逐行解读**：
+- 所有描述符的 **OWN=1**：初始化完成后，所有缓冲区立即归 DMA 管辖，等待接收帧。
+- **环形链的物理构成**：最后一个节点的 `next` 指回第 0 个节点，形成真正的环形。
+- **DMARDLAR 寄存器**：这是 DMA 引擎的"起跑线"，DMA 从这个地址出发，沿着 `next` 指针一路巡检有没有 OWN=1 的缓冲区等待接收。
+
+## 4. 深度补充：CPU 处理逻辑与丢包恢复策略
+
+当 DMA 收到一帧并将 OWN 置 0 后，CPU 如何处理？如何避免丢包？
+
+```c
+/* 在主循环或中断中轮询接收描述符 */
+void eth_rx_poll(void)
+{
+    /* current_rx_desc 是 CPU 维护的当前处理指针 */
+    while (!(current_rx_desc->status & ETH_DMARxDesc_OWN))
+    {
+        /* 1. OWN=0：DMA 已写完，帧数据在 current_rx_desc->buf1_addr 中 */
+        uint32_t frame_len = (current_rx_desc->status >> 16) & 0x3FFF;
+        
+        /* 2. 将数据送入协议栈处理（ethernetif_input 内部调用） */
+        process_rx_frame(current_rx_desc->buf1_addr, frame_len);
+        
+        /* 3. 处理完成：将 OWN 置回 1，将缓冲区控制权归还给 DMA */
+        current_rx_desc->status = ETH_DMARxDesc_OWN;
+        
+        /* 4. CPU 指针移向环形链中的下一个描述符 */
+        current_rx_desc = current_rx_desc->next;
+    }
+    
+    /* 5. 如果 DMA 因为找不到可用描述符而暂停，触发重启 */
+    if (ETH->DMASR & ETH_DMASR_RBUS) /* 接收缓冲区不可用标志 */
+    {
+        ETH->DMASR = ETH_DMASR_RBUS;   /* 清除该中断标志 */
+        ETH->DMARPDR = 0;               /* 唤醒 DMA RX 轮询 */
+    }
+}
+```
+
+> [!CAUTION]
+> **丢包陷阱**：如果 CPU 处理帧的速度比 DMA 接收帧的速度慢，会导致所有描述符的 OWN 都是 0（CPU 没来得及归还），DMA 找不到可用缓冲区就会停止接收并置位 **RBUS 标志**。此时即使新帧来了也会被网卡硬件直接丢弃！解决方案：要么增加描述符数量，要么加快 CPU 处理速度（中断驱动替代轮询）。
+
+---
+
 ## 总结速查
 
 - **MAC 初始化**需按"时钟→引脚→复位→MAC地址→过滤→DMA描述符→启动"的严格顺序完成

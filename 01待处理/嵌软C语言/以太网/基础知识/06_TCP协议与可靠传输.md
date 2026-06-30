@@ -141,6 +141,65 @@ err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
 
 ---
 
+## 3. 深度补充：TCP 重传机制（RTO）
+
+TCP 可靠性的核心秘密在于：**发出去的每个字节，如果对方没有确认（ACK），就会在一段时间后自动重发**。这个超时时间称为 **RTO（Retransmission Timeout，重传超时时间）**。
+
+### 3.1 RTO 的动态计算
+
+RTO 不是一个固定值，而是根据网络实时状况动态计算的。TCP 实时测量每次发送到收到 ACK 的往返时延 **RTT（Round-Trip Time）**，然后用指数加权平均来估算下一次的 RTO：
+
+```
+SRTT  = α * SRTT + (1 - α) * RTT_sample   // 平滑RTT，α通常取7/8
+RTTVAR = β * RTTVAR + (1 - β) * |SRTT - RTT_sample| // RTT方差，β通常取3/4
+RTO = SRTT + 4 * RTTVAR                    // 最终RTO
+```
+
+**嵌入式关键影响**：
+- 如果 `sys_check_timeouts()` 调用间隔过大，RTT 计算误差增大，RTO 会偏保守（偏大），导致重传延迟增加，TCP 性能下降。
+- LwIP 中 RTO 的最小值由 **TCP_SLOW_INTERVAL**（默认 500ms）决定，在局域网环境中这个值偏大，可适当调小。
+
+### 3.2 LwIP 中的两个关键（却常被忽视）回调
+
+在前面的 TCP 代码骨架中，我们只展示了 `tcp_recv` 和 `tcp_sent`。但在生产代码中，另外两个回调几乎是**必须注册**的：
+
+**tcp_err 回调（错误处理）**：
+当 TCP 连接发生不可恢复的错误时（如对方 RST 强制断开、内存不足导致连接被迫关闭），LwIP 会调用 `tcp_err` 回调，并自动释放 PCB。
+
+```c
+void on_tcp_err(void *arg, err_t err) {
+    struct my_app_state *state = (struct my_app_state *)arg;
+    /* 注意：此时 PCB 已被 LwIP 自动释放，不要再调用 tcp_close */
+    state->pcb = NULL;   /* 将本地 PCB 指针置空，防止后续访问野指针 */
+    state->connection_alive = 0;
+    /* 可以在这里触发重连逻辑 */
+}
+// 注册方式：
+tcp_err(pcb, on_tcp_err);
+```
+
+> [!CAUTION]
+> **野指针陷阱**：如果不注册 `tcp_err`，或者在 err 回调中忘记将本地 PCB 指针清零，程序在连接断开后继续用已被释放的 PCB 调用 `tcp_write` 等函数，会导致访问野指针，引发 **HardFault**。
+
+**tcp_poll 回调（超时轮询）**：
+LwIP 会按固定时间间隔调用 `tcp_poll`，用于实现**应用层的心跳/超时检测**：
+
+```c
+err_t on_tcp_poll(void *arg, struct tcp_pcb *pcb) {
+    struct my_app_state *state = (struct my_app_state *)arg;
+    state->idle_counter++;
+    if (state->idle_counter > 10) {  /* 超过10个轮询间隔无数据 */
+        tcp_abort(pcb);              /* 强制关闭连接 */
+        return ERR_ABRT;
+    }
+    return ERR_OK;
+}
+// 注册方式（第3个参数是每几个TCP慢定时器间隔触发一次，即500ms * N）：
+tcp_poll(pcb, on_tcp_poll, 4);  /* 每 4 * 500ms = 2秒触发一次 */
+```
+
+---
+
 ## 总结速查
 
 - **TCP** 是面向连接、可靠、全双工的传输层协议，代价是三次握手+四次挥手+序列号确认+滑动窗口
