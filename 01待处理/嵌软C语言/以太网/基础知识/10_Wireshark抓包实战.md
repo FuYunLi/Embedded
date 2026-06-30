@@ -116,6 +116,54 @@ Wireshark 捕获的包量极大，必须使用过滤器聚焦目标数据：
 
 ---
 
+## 3. 深度补充：TCP 重传包在 Wireshark 中的识别
+
+当网络出现丢包或 LwIP 的 `sys_check_timeouts()` 调用不及时时，TCP 会触发重传。Wireshark 能够精确识别并标注重传包——这是调试 LwIP 性能问题的重要手段。
+
+### 3.1 Wireshark 自动标注的重传类型
+
+Wireshark 会在数据包列表的 Info 列自动标注以下重传类型：
+
+| 标注文字 | 含义 | 触发原因 |
+|---|---|---|
+| **[TCP Retransmission]** | 普通超时重传 | 发送包在 RTO 时间内未收到 ACK |
+| **[TCP Fast Retransmission]** | 快速重传 | 连续收到 3 个重复 ACK |
+| **[TCP Out-of-Order]** | 乱序包 | 序列号不连续（非丢失，只是到达顺序错乱） |
+| **[TCP Dup ACK]** | 重复 ACK | 接收方收到乱序包后，反复确认最后一个连续序列号 |
+
+### 3.2 如何过滤重传包
+
+```
+# 过滤所有重传包（快速重传+超时重传）
+tcp.analysis.retransmission
+
+# 过滤所有与 TCP 分析异常相关的包
+tcp.analysis.flags
+
+# 组合使用：只看单片机 IP 的重传情况
+tcp.analysis.retransmission && ip.addr == 192.168.1.10
+```
+
+### 3.3 重传包出现意味着什么？
+
+- **少量偶发重传**：可能是局域网中的交换机队列短时拥塞，属于正常现象。
+- **大量连续重传**：说明 LwIP 的 `sys_check_timeouts()` 调用间隔过长，导致 TCP 定时器超时。立即检查主循环是否有阻塞操作。
+- **重传后跟着 [RST]**：对方主动拒绝了重传，连接被强制重置，检查服务端是否已关闭连接。
+
+## 4. 深度补充：Wireshark 常见抓包异常情景分析
+
+| 观察到的现象 | 原因分析 | 对应代码检查点 |
+|---|---|---|
+| 只有 ARP 请求，无 ARP 应答 | 目标 IP 不在线 / 不在同一子网 | 检查 IP 地址和子网掩码配置 |
+| ARP 应答正常，但 Ping 超时 | ICMP 校验和错误 / IP 层路由错误 | 检查 ICMP 结构体 packed 属性和 checksum 计算 |
+| 首次 Ping 超时，后续正常 | PHY 自协商未完成就启动 DMA | 在初始化中添加自协商等待（见 PHY 笔记） |
+| 能 Ping 通但 TCP 连不上 | 目标端口未监听 / 防火墙拦截 | 检查服务端防火墙，或换一个端口测试 |
+| TCP 连接后立刻断开（RST）| 对方 PCB 配置限制 / 端口权限问题 | 检查 LwIP 的 MEMP_NUM_TCP_PCB 是否用尽 |
+| 数据传输中途卡住不动 | `tcp_recved()` 未调用，窗口冻结 | 检查每个 recv 回调是否调用了 tcp_recved |
+| 大量 [TCP Retransmission] | sys_check_timeouts 调用太慢 | 缩短主循环阻塞操作，提高定时器调用频率 |
+
+---
+
 ## 总结速查
 
 - **Wireshark** 是以太网调试的 X 光机，将每比特解剖为人类可读的协议字段

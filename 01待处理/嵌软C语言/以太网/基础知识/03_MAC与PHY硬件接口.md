@@ -113,6 +113,77 @@ if (phy_status & PHY_LINK_STATUS) {
 
 ---
 
+## 3. 深度补充：PHY 自协商机制与自协商失败的处理
+
+初始化以太网时，最常遇到的问题就是"硬件连好了，程序也运行了，但就是 Ping 不通"。99% 的情况是 PHY 的**自协商（Auto-Negotiation）**出现了问题，或者根本没有等待协商完成就启动了数据收发。
+
+### 3.1 自协商的工作机制
+
+PHY 的自协商是两台网络设备之间**自动协商双工模式（全双工/半双工）和速率（100Mbps/10Mbps）**的过程。它的本质是一段物理层信号握手，发生在网线刚插上（Link 建立）的最初几百毫秒内。
+
+协商过程如下：
+1. 双方 PHY 通过网线交换"能力集"：我支持 100M 全双工 + 10M 全双工
+2. 双方取能力集的交集，选择最优模式：100M 全双工
+3. 协商完成后，PHY 的 BMSR 寄存器中"Auto-Negotiation Complete"位被置 1
+
+> [!WARNING]
+> **经典踩坑**：MAC 初始化代码中，软件复位 PHY 后直接启动 DMA 收发，完全没有等待自协商完成。结果是在最初的几百毫秒里，PHY 还没协商好速率/双工，导致帧丢失或电平错误，进而出现：Ping 偶尔能通一两个包、然后断掉；或者第一次 Ping 永远超时，但第二次 Ping 就成功了。
+
+### 3.2 正确的 PHY 初始化等待策略
+
+```c
+#define PHY_ADDR    0          /* PHY 物理地址（硬件引脚决定，通常0或1）*/
+#define PHY_TIMEOUT_MS  2000   /* 最长等待 2 秒，超时认为协商失败 */
+
+uint8_t eth_phy_init(void)
+{
+    uint16_t phy_status;
+    uint32_t timeout = 0;
+    
+    /* 1. 通过 BMCR 寄存器软复位 PHY */
+    ETH_WritePHYRegister(PHY_ADDR, 0, 0x8000);  /* BMCR bit15=软复位 */
+    
+    /* 2. 等待软复位完成（复位后该位自动清零）*/
+    do {
+        phy_status = ETH_ReadPHYRegister(PHY_ADDR, 0); /* 读 BMCR */
+        timeout++;
+    } while ((phy_status & 0x8000) && (timeout < PHY_TIMEOUT_MS));
+    
+    /* 3. 使能自协商（BMCR bit12=Auto-Negotiation Enable, bit9=Restart） */
+    ETH_WritePHYRegister(PHY_ADDR, 0, 0x1200);
+    
+    /* 4. 等待自协商完成（BMSR bit5=Auto-Negotiation Complete）*/
+    timeout = 0;
+    do {
+        phy_status = ETH_ReadPHYRegister(PHY_ADDR, 1); /* 读 BMSR */
+        timeout++;
+        delay_ms(1);
+    } while (!(phy_status & 0x0020) && (timeout < PHY_TIMEOUT_MS));
+    
+    if (timeout >= PHY_TIMEOUT_MS) {
+        /* 5. 自协商超时——降级为手动强制 100M 全双工 */
+        ETH_WritePHYRegister(PHY_ADDR, 0, 0x2100); /* 100M + Full Duplex */
+        return 0; /* 返回错误码 */
+    }
+    
+    /* 6. 读取协商结果，配置 MAC 速率与双工参数 */
+    phy_status = ETH_ReadPHYRegister(PHY_ADDR, 1);
+    /* 实际速率/双工信息在 PHY 厂商自定义寄存器中，如 LAN8720 的寄存器31 */
+    return 1; /* 协商成功 */
+}
+```
+
+### 3.3 PHY 地址的由来
+
+你可能注意到上面代码中的 `PHY_ADDR = 0`。这个地址是由 PHY 芯片的**硬件引脚（PHYAD[0:4]）**的高低电平决定的，通常在电路板上通过上下拉电阻配置。
+
+不同 PHY 芯片的默认地址不同，常见值：
+- **LAN8720**：默认地址 0 或 1（由 RXER/PHYAD0 引脚的上下拉决定）
+- **DP83848**：默认地址 1
+- **CH32V307 内置 PHY（WCHNET）**：地址 0
+
+---
+
 ## 总结速查
 
 - **MAC** 负责帧级处理（组装帧/CRC/地址过滤/DMA），**PHY** 负责信号级收发（编码/驱动/链路检测/自协商）
