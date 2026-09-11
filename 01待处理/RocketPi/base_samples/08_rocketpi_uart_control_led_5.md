@@ -11,21 +11,21 @@ references:
 
 # 08 函数协作全景：一次完整交互的全链路跟踪
 
-> [[08_rocketpi_uart_control_led|主笔记]] 按模块讲了结构，[[08_rocketpi_uart_control_led_3|逐类精读]] 按类别讲了写法。这篇回答最后一个问题：**这些函数如何咬合在一起，把上电、敲一条命令、收到回复这三段经历完整跑通**。像看一部电影，不拆镜头，只跟剧情。
+> [[08_rocketpi_uart_control_led|主笔记]] 按模块讲了结构，[[08_rocketpi_uart_control_led_3|逐类精读]] 按类别讲了写法。这篇回答最后一个问题：**这些函数如何咬合在一起，把上电、敲一条命令、收到回复这三段经历完整跑通**。像看一部电影，不拆镜头，只跟剧情。文中提及的每个函数都已链接到 _3 的对应章节，点击可跳转。
 
 ## 全景地图：把函数名钉在三个时间线上
 
-先把 20+ 个函数按"什么时候被调用"钉在三张图上，孤立的函数名就有了坐标系：
+先把 21 个函数按"什么时候被调用"钉在三张图上，孤立的函数名就有了坐标系：
 
 **时间线一：上电时刻**（main 初始化段，只走一次）
 
 ```
 main
  ├─ MX_GPIO_Init / MX_USART2_UART_Init     （CubeMX 生成，硬件就绪）
- ├─ console_print_examples                 ─→ console_send_string（×4 行欢迎语）
- ├─ console_print_gpio_map                 ─→ console_pin_index / console_port_name
- │                                            ─→ snprintf → console_send_string（逐灯发）
- └─ console_send_prompt                    ─→ console_send_string（发 "\r\n> "）
+ ├─ [[08_rocketpi_uart_control_led_3#console_print_examples——开机引导|console_print_examples]]          ─→ [[08_rocketpi_uart_control_led_3#console_send_string——一切输出的总闸门|console_send_string]]（×4 行欢迎语）
+ ├─ [[08_rocketpi_uart_control_led_3#console_print_gpio_map——自描述输出|console_print_gpio_map]]            ─→ pin_index / port_name
+ │                                            ─→ snprintf → send_string（逐灯发）
+ └─ [[08_rocketpi_uart_control_led_3#console_send_prompt——会话节奏控制器|console_send_prompt]]              ─→ send_string（发 "\r\n> "）
 ```
 
 上电时刻做的事：**宣告身份（欢迎语）→ 自报家门（gpio_map，上位机自动发现硬件）→ 摆好姿势等命令（提示符）**。此时两个字符串原语（pin_index/port_name）唯一一次出场，使命是把配置表翻译成 PC 能读的 JSON。发送侧所有输出都经由 send_string 这个总闸门。
@@ -35,7 +35,7 @@ main
 ```
 while (1) {
   HAL_UART_Receive(&huart2, &byte, 1, HAL_MAX_DELAY)   ← 程序在此沉睡，直到串口来字节
-  console_handle_input_byte(byte)                       ← 醒来只干一小口，立刻回去睡
+  [[08_rocketpi_uart_control_led_3#console_handle_input_byte——行组装的门卫|console_handle_input_byte]](byte)          ← 醒来只干一小口，立刻回去睡
 }
 ```
 
@@ -47,9 +47,9 @@ while (1) {
 
 以输入 `{"led":["B","G"],"state":[1,0]}` 为例，跟踪每个函数的出场顺序和数据变化。
 
-### 第一幕：字节进入（handle_input_byte，被调用 32 次）
+### 第一幕：字节进入（[[08_rocketpi_uart_control_led_3#console_handle_input_byte——行组装的门卫|handle_input_byte]]，被调用 32 次）
 
-用户在终端敲下这行字，PC 串口助手逐字节发出。主循环每收到一个字节就调用一次 handle_input_byte。前 30 个字节走的是最简单的路径：
+用户在终端敲下这行字，PC 串口助手逐字节发出（含末尾 \r\n 两字符）。主循环每收到一个字节就调用一次 handle_input_byte。前 30 个字节走的是最简单的路径：
 
 ```
 byte='{':  不是\r不是\n，缓冲未满 → g_rx_buffer[0]='{'，g_rx_length=1
@@ -57,42 +57,42 @@ byte='"':  → g_rx_buffer[1]='"'，g_rx_length=2
 ...（依此类推，纯追加）
 ```
 
-两个特殊字节需要拦截：输入末尾的 `\r`（PC 发送 \r\n 两连发）直接被吞——**\r 没有语义，\n 才是命令结束信号**；如果中途缓冲满 127 字节，则清零 g_rx_length、报 "command too long"、重发提示符——**牺牲这一条，保住后续所有命令的可用性**。
+两个特殊字节需要拦截：输入末尾的 `\r` 直接被吞——**\r 没有语义，\n 才是命令结束信号**；如果中途缓冲满 127 字节，则清零 g_rx_length、报 "command too long"、重发提示符——**牺牲这一条，保住后续所有命令的可用性**。
 
 ### 第二幕：结算触发（第 32 个字节 \n 到达）
 
 ```
-byte='\n' → console_process_command_buffer()   ← 整行已就位
+byte='\n' → [[08_rocketpi_uart_control_led_3#console_process_command_buffer——解析编排层|console_process_command_buffer]]()   ← 整行已就位
            → g_rx_length = 0                    ← 缓冲复位，随时接下一条
-           → console_send_prompt()              ← 先摆好提示符？不——见下
+           → [[08_rocketpi_uart_control_led_3#console_send_prompt——会话节奏控制器|console_send_prompt]]()            ← 提示符在应答之后
 ```
 
 实际顺序是：process 先跑完（里面可能输出应答），然后才清缓冲、发提示符。**提示符是"我准备好了"的信号**，出现在应答之后，用户看到的光标永远停在下一条命令该出现的地方。
 
 ### 第三幕：解析（process 内部，解析引擎全员出场）
 
-process_command_buffer 做的第一件事是 `g_rx_buffer[g_rx_length] = '\0'`——把字节缓冲变成合法 C 字符串（g_rx_length 被 handle_input_byte 保证不越过 SIZE-1，这里写 '\0' 不会越界，**两个函数共同维护同一条不变式，各管一半**）。
+process_command_buffer 做的第一件事是 `g_rx_buffer[g_rx_length] = '\0'`——把字节缓冲变成合法 C 字符串（handle_input_byte 保证 g_rx_length 不越过 SIZE-1，这里写 '\0' 不会越界，**两个函数共同维护同一条不变式，各管一半**）。
 
 然后是两次解析调用，注意游标变量 value 的位置变化：
 
 ```
-console_parse_led_targets(json, &command)
- └─ value = console_find_json_value(json, "\"led\"")
+[[08_rocketpi_uart_control_led_3#console_parse_led_targets——数组/单值分流循环|console_parse_led_targets]](json, &command)
+ └─ value = [[08_rocketpi_uart_control_led_3#console_find_json_value——锚定式键查找|console_find_json_value]](json, "\"led\"")
      │  strstr 找到位置 1 的 "led"，跳过键+冒号+空白
      │  value 现指向 → ["B","G"],"state":[1,0]}
      └─ *value=='[' → 进入数组循环：
-         ├─ value=skip_spaces(value)                       位置不变（[后无空格）
-         ├─ console_parse_led_token(&value, cmd) 第一次
-         │    扫出 "B" → str_case_equal 配 ALL？否
-         │    → find_led_by_token("B") → 查 g_led_config 命中下标 0
-         │    → add_led_index：led_index[0]=0，led_count=1
+         ├─ value=[[08_rocketpi_uart_control_led_3#console_skip_spaces——游标推进器|console_skip_spaces]](value)                       位置不变（[后无空格）
+         ├─ [[08_rocketpi_uart_control_led_3#console_parse_led_token——游标签名详解|console_parse_led_token]](&value, cmd) 第一次
+         │    扫出 "B" → [[08_rocketpi_uart_control_led_3#console_str_case_equal——不依赖 locale 的 strcasecmp|str_case_equal]] 配 ALL？否
+         │    → [[08_rocketpi_uart_control_led_3#console_find_led_by_token——双层查表|find_led_by_token]]("B") → 查 g_led_config 命中下标 0
+         │    → [[08_rocketpi_uart_control_led_3#console_add_led_index——去重与容量的合体|add_led_index]]：led_index[0]=0，led_count=1
          │    → *cursor 回写，value 现指 → ,"G"],"state":[1,0]}
          ├─ *value==',' → ++value 跳过逗号
-         ├─ console_parse_led_token 第二次 → "G" → 下标 1，led_count=2
+         ├─ parse_led_token 第二次 → "G" → 下标 1，led_count=2
          └─ *value==']' → 跳过，break
 
-console_parse_state_values(json, &command)   同样的数组循环
- └─ "1" → state_token 数字分支 → number=1 → states[0]=true，state_count=1
+[[08_rocketpi_uart_control_led_3#console_parse_state_values——同构的姊妹分流|console_parse_state_values]](json, &command)   同样的数组循环
+ └─ "1" → [[08_rocketpi_uart_control_led_3#console_parse_state_token——多类型分派|parse_state_token]] 数字分支 → number=1 → states[0]=true，state_count=1
  └─ "0" → states[1]=false，state_count=2
 ```
 
@@ -102,9 +102,9 @@ console_parse_state_values(json, &command)   同样的数组循环
 
 ```
 state_count(2) == led_count(2) ✓ 通过校验
-console_apply_command(&command)
+[[08_rocketpi_uart_control_led_3#console_apply_command——广播语义的执行层|console_apply_command]](&command)
  └─ i=0: state_index = (state_count==1) ? 0 : 0 = 0   ← 一一对应分支
- │       console_set_led_state(0, true)
+ │       [[08_rocketpi_uart_control_led_3#console_set_led_state——引脚写入的唯一入口|console_set_led_state]](0, true)
  │        → HAL_GPIO_WritePin(GPIOB, LED_B_Pin, RESET)   ← LED_B 亮（低电平点亮）
  └─ i=1: state_index = 1
          console_set_led_state(1, false)
@@ -116,7 +116,7 @@ console_apply_command(&command)
 ### 第五幕：汇报（数字世界翻译回文本）
 
 ```
-console_report_result(&command)
+[[08_rocketpi_uart_control_led_3#console_report_result——snprintf 链式拼装|console_report_result]](&command)
  └─ snprintf 链式拼装（buf 游标 pos 逐步推进）：
     {"status":"ok","led":["B","G"],"state":[1,0]}\r\n
  └─ console_send_string → HAL_UART_Transmit → PC
@@ -165,7 +165,7 @@ main ──→ handle_input_byte ──→ process_command_buffer ──┬→ f
 2. process → parse_led_targets → find_json_value 找到 led 入口 → parse_led_token 扫出 "X"
 3. find_led_by_token("X")：外层 3 颗灯 × 内层 3 别名 = 9 次 str_case_equal 全部失配 → 返回 -1
 4. parse_led_token 返回 false → parse_led_targets 返回 false → **流程在第三幕中途退出**
-5. process 捕获失败 → report_error 输出 {"status":"error",...} → send_prompt
+5. process 捕获失败 → [[08_rocketpi_uart_control_led_3#console_report_error——错误应答模板|report_error]] 输出 {"status":"error",...} → send_prompt
 
 注意 GPIO 全程未动、也没有"半个 command 被执行"——**失败路径的退出点在执行之前**，这就是把校验全部前置换来的安全。最坏情况（超长命令）在第一幕就被拦截，付出的代价只是清缓冲+一句报错。
 
@@ -177,11 +177,11 @@ main ──→ handle_input_byte ──→ process_command_buffer ──┬→ f
 等字节 → 攒行 → 定位字段 → 逐 token 推进翻译 → 查表转数字 → 校验语义 → 一次执行 → 结构化应答
 ```
 
-11 的 shell（shell）在这条线上补行编辑和命令表；13 的雷达（雷达帧解析）把"定位字段"换成帧头同步、把 token 推进换成定长字段切片；AT 框架再把"执行"换成"转发给模组并等应答"。函数可以无限变多，**三幕结构（收→解→行）和两条数据通道（字符串进、结构体出）不变**。
+11 的 shell 在这条线上补行编辑和命令表；13 的雷达帧把"定位字段"换成帧头同步、把 token 推进换成定长字段切片；AT 框架再把"执行"换成"转发给模组并等应答"。函数可以无限变多，**三幕结构（收→解→行）和两条数据通道（字符串进、结构体出）不变**。
 
 ## 关联笔记
 
 - [[08_rocketpi_uart_control_led]] — 主笔记：逐模块结构精读
-- [[08_rocketpi_uart_control_led_3|静态辅助函数逐类精读]] — 本文各函数的写法拆解
+- [[08_rocketpi_uart_control_led_3|静态辅助函数逐类精读]] — 本文各函数的写法拆解（标题级链接）
 - [[08_rocketpi_uart_control_led_6|同类需求识别与设计迁移]] — 这个骨架还能复制到哪里
 - [[07_rocketpi_uart_echo]] — 接收层的工程版（DMA），可替换第一幕
