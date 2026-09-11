@@ -1,11 +1,10 @@
 ---
-status: todo
+status: done
 created: 2026-09-11
 tags:
   - stm32/uart
   - c/parsing
   - rocketpi/base_samples
-  - todo
 references:
   - "[[Embedded_Code]] 01待处理/rocketpi/base_samples/08_rocketpi_uart_control_led/main.c"
 ---
@@ -28,7 +27,7 @@ references:
 {"status":"error","msg":"missing led field"}
 ```
 
-完整的"控制台命令交互"雏形——[[11_rocketpi_uart_shell_microrl|11 的 shell]] 是它的成熟形态，09 用 cJSON 库重写同款解析形成手写 vs 库的对照。
+完整的"控制台命令交互"雏形——为什么要做这种交互、shell/AT 终端谱系见 [[08_rocketpi_uart_control_led_1|串口交互终端的意义]]；11 的 shell 是它的成熟形态，09 用 cJSON 库重写同款解析形成手写 vs 库的对照。
 
 ## 架构主线：三层流水线
 
@@ -238,6 +237,10 @@ length += snprintf(&buffer[length], ..., "],\"state\":[");
 
 ## 关联笔记
 
+- [[08_rocketpi_uart_control_led_1|串口交互终端的意义]] — 为什么做交互终端、shell/AT/NMEA 谱系
+- [[08_rocketpi_uart_control_led_2|数据结构与 API 设计]] — 从需求反推每个结构体/函数边界的存在理由
+- [[08_rocketpi_uart_control_led_3|静态辅助函数逐类精读]] — 四类函数逐个拆到可复刻
+- [[08_rocketpi_uart_control_led_4|串口文本协议谱系]] — 08 在协议学习路线上的定位，衔接 10/11/13
 - [[06_rocketpi_uart_printf]] — 发送侧基建与 snprintf 游标套路出处
 - [[06_rocketpi_uart_printf_3|hexdump 详解]] — snprintf 链式拼接的原理详解
 - [[06_rocketpi_uart_printf_4|C 标准库补课]] — strstr/isdigit/isalpha/toupper 本例全用上了
