@@ -12,11 +12,11 @@ references:
 
 # 08 静态辅助函数逐类精读
 
-> 08 的 20+ 个 static 函数是初学者最头畲的部分——名字多、看似碎片。实际上它们分四类，每类内部高度同构，掌握一类就掌握一类函数的通用写法。本文逐类逐个拆解到"能独立复刻"的程度。函数命名前缀 `console_` 是模块前缀，避免全局命名空间污染（static + 前缀是小项目的土法命名空间）。函数之间如何协作完成一次完整交互，见 [[08_rocketpi_uart_control_led_5|函数协作全景]]。
+> 08 共 21 个 static 函数，名字多、看似碎片。实际上它们分四类，每类内部高度同构，掌握一类就掌握一类函数的通用写法。本文逐类逐个拆解到"能独立复刻"的程度，四个小节标题即函数名，可从其他笔记精确链接跳转。函数命名前缀 `console_` 是模块前缀，避免全局命名空间污染（static + 前缀是小项目的土法命名空间）。函数之间如何协作完成一次完整交互，见 [[08_rocketpi_uart_control_led_5|函数协作全景]]。
 
-## 第一类：I/O 网关函数（2 个）
+## 第一类：I/O 网关与行组装（4 个）
 
-**特征：只搬字节，是程序里唯一真正碰硬件 UART 发送的函数。**
+**特征：处在系统的边界上——对外碰硬件 UART，对内提供纯文本/纯字节接口，是唯一允许知道 huart2 存在的函数群。**
 
 ### console_send_string——一切输出的总闸门
 
@@ -47,6 +47,54 @@ static void console_send_prompt(void)
 ```
 
 一行函数也值得独立存在：**"什么时候发提示符"是一个独立决策点**，嵌在代码里的字面量是魔法值，抽成函数后，未来加时间戳（`[12:33]> `）、加 ANSI 颜色只改一处。\r\n 双字符的原因在 [[08_rocketpi_uart_control_led_1|交互终端笔记]]：终端把 \r（回车）和 \n（换行）当两个动作。
+
+### console_print_examples——开机引导
+
+```c
+static void console_print_examples(void)
+{
+  console_send_string("RocketPi UART LED console ready.\r\n");
+  console_send_string("Example commands:\r\n");
+  console_send_string("  {\"led\":\"B\",\"state\":1}\r\n");
+  console_send_string("  {\"led\":[\"B\",\"G\"],\"state\":[1,0]}\r\n");
+}
+```
+
+只在上电调用一次。两个观察点：
+- **连续四条 send_string 而不是拼一个大字符串一次发**：每条独立成句、可读性高，也避免了在栈上开一个大缓冲做拼接。代价是四次 HAL 调用各有少量开销——上电时刻无所谓，这个判断和 [[08_rocketpi_uart_control_led_3#console_report_result——snprintf 链式拼装|report_result]] 里"发送粒度合并"不矛盾：**一次性多段内容才值得拼，固定几行直接发**
+- **和 print_gpio_map 是一对**：print_examples 是人可读的引导（告诉人怎么用），print_gpio_map 是机器可读的自描述（告诉上位机有什么资源）——开机输出同时面向两类"读者"
+
+### console_handle_input_byte——行组装的门卫
+
+主笔记从流水线视角讲过它的三个防御，这里补行级细节：
+
+```c
+static void console_handle_input_byte(uint8_t data)
+{
+  if (data == '\r') return;          // ① 吞 \r
+  if (data == '\n')                  // ② \n = 结算信号
+  {
+    console_process_command_buffer();
+    g_rx_length = 0U;
+    console_send_prompt();
+    return;
+  }
+  if (g_rx_length >= (UART_RX_BUFFER_SIZE - 1U))  // ③ 超长防御
+  {
+    g_rx_length = 0U;
+    console_report_error("command too long");
+    console_send_prompt();
+    return;
+  }
+  g_rx_buffer[g_rx_length++] = (char)data;        // ④ 正常追加
+}
+```
+
+- **① 为什么先判 \r**：PC 端发送 \r\n 两连发。若顺序反了，\n 先触发结算并清零缓冲，随后到来的 \r 会落到干净缓冲里，成为下一条命令的第一个垃圾字节。\r 必须在一切之前无条件吞掉
+- **①②③④ 的顺序纪律**：控制字符（\r\n）永远不占缓冲空间，所以它们的判断必须在追加之前；超长检查必须在追加之前；\n 结算在超长之前（\n 不走长度计数，不存在"缓冲满且当前是 \n"的冲突）。这个顺序不是风格，是正确性
+- **③ 的 `-1` 和 `>=` 精确含义**：SIZE-1 是最后一个合法写入位（留给结算时的 '\0'）。g_rx_length 等于 SIZE-1 时，再收任何数据字节就要把 '\0' 的位置挤掉，所以用 >= 拦截。**③ 与 [[08_rocketpi_uart_control_led_3#console_process_command_buffer——解析编排层|process_command_buffer]] 里的 `g_rx_buffer[g_rx_length] = '\0'` 是同一条不变式的两端**：这边保证长度永不越过 SIZE-1，那边才能放心写下标 g_rx_length
+- **`(char)data` 强转**：HAL 是字节流视角（uint8_t），缓冲是文本视角（char）。纯 ASCII 命令下两者无损；隐含前提是"命令是 ASCII"——若将来命令带高位字节，char 的符号性会干扰 ctype 判断（见第二类 str_case_equal 的 unsigned char 铁律）
+- **错误路径也发提示符**：报错后缓冲已清零，重发提示符告诉用户"可以重新输入"——错误恢复不能只报错不给出口
 
 ## 第二类：字符串原语（4 个）
 
@@ -118,7 +166,7 @@ static uint32_t console_pin_index(uint16_t pin)
 - **pin_index 的线性扫描**：16 次循环找 1<<i == pin。位图→编号也可以用 `__CLZ`（前导零计数）指令一条完成，但那是 CMSIS 扩展；教学代码用可移植写法。**查表/扫描 vs 位指令是可移植性 vs 效率的典型取舍**
 - **失败哨兵 0xFFFFFFFF**：pin_index 找不到匹配时返回它而不是 0（0 是合法引脚号！）。**哨兵值必须从合法值域外取**——调用方 `pin_index <= 15U` 判断才可靠
 
-## 第三类：解析引擎（6 个）——核心重点
+## 第三类：解析引擎（8 个）——核心重点
 
 **特征：以「游标 + 查表」为骨架，函数间用统一签名组合。**
 
@@ -202,6 +250,62 @@ else                      → 可选负号 + isdigit 逐位 number*10 + (*ptr-'0
 - **负号的语义化处理**：state:-1 解析出 negative=true，value=false——负数按「关」处理，把「非法输入」翻译成「合理意图」而非报错。宽容解析是命令交互的友好性设计，但注意：**宽容要有边界**（负号后必须紧跟数字，否则 return false），否则解析器成了猜谜器
 - **数字溢出**：number 是 uint32_t，128 字节行缓冲最多 126 个数字位，理论可溢出。教学代码未处理；工程代码应判 `number > (UINT32_MAX - digit) / 10`。**知道边界在哪、明说不处理，和不知道，是两个层次**
 
+### console_parse_led_targets——数组/单值分流循环
+
+上面两个 token 解析器只认"单个值"，本函数负责判断值的形态并组织循环——**token 引擎之上的编排**：
+
+```c
+static bool console_parse_led_targets(const char *json, LedCommand_t *cmd)
+{
+  if ((json == NULL) || (cmd == NULL)) return false;
+
+  const char *value = console_find_json_value(json, "\"led\"");
+  if (value == NULL)
+  {
+    value = console_find_json_value(json, "\"LED\"");   // ① 键名大写兑底
+  }
+  if (value == NULL) return false;
+
+  if (*value == '[')          // ② 数组形态
+  {
+    ++value;                  // 跳过 '['
+    while (true)
+    {
+      value = console_skip_spaces(value);
+      if (*value == ']') { ++value; break; }          // ③ 空数组/收尾
+      if (!console_parse_led_token(&value, cmd)) return false;  // ④ 逐元素
+      value = console_skip_spaces(value);
+      if (*value == ',') { ++value; continue; }       // ⑤ 逗号继续
+      if (*value == ']') { ++value; break; }          // ⑥ 正常结束
+      return false;                                    // ⑦ 其他字符 = 畸形
+    }
+  }
+  else if (*value == '"')     // ⑧ 单值形态
+  {
+    if (!console_parse_led_token(&value, cmd)) return false;
+  }
+  else
+  {
+    return false;            // ⑨ 既不是数组也不是字符串
+  }
+
+  return (cmd->led_count > 0U);   // ⑩ 最终有效性
+}
+```
+
+- **① 的大小写兑底**：JSON 规范键名大小写敏感，这里宽容处理 "LED" 全大写变体。注意局限：混合大小写 "Led" 不认——宽容有边界，枚举常见的两三种而不是无限制
+- **②⑧⑨ 按首字符分流**：'[' 进数组、'"' 进单值、其他拒绝——JSON 语法的自然分形，**分流依据是值的首字符**
+- **③⑥ 两处 ']' 检查的区别**：③ 处理"空数组 `[]`"和"循环第二轮后的收尾"；⑥ 处理"元素后直接收尾"。两处都要 `++value` 消费掉 ']'（终结符显式消费纪律，同 token 解析器的⑨）
+- **⑤⑦ 与畸形输入**：`[x,,y]` 双逗号在跳过第一个逗号后，第二轮循环里 parse_led_token 看到 ',' 不是 '"' 而失败（④ 拦截）；`[x y]` 元素后是空格+字母，skip 后既非 ',' 也非 ']'，落进 ⑦。**每条非法路径都有对应的拦截点**，画解析器状态转移图时逐条对号
+- **⑩ 冗余保险**：当前实现下走到这里的路径 led_count 必然 ≥1（单值成功或数组至少收一个元素），`led_count > 0` 是语义冗余。它的价值看未来：若 token 解析器将来宽容零长 token，这条就是最后防线。**防御性收尾检查防的是代码的演变方向，不是当前路径**
+
+### console_parse_state_values——同构的姊妹分流
+
+与 led_targets 循环骨架完全相同（①大写兑底 → 分流 → while 循环 → 有效性收尾），差异只有两处，这个差异本身就是知识点：
+
+1. **token 解析器换成 parse_state_token**——查表逻辑不同而已，框架零改动。**同构代码的复用方式不是抽象成宏/模板（C 做起来难看），而是接受两份平行实现，靠命名对称性（led_/state_）保持可对照性**
+2. **led 的单值分支必须检查 '"' 开头（⑧），state 的单值直接调 token**——因为 led 的值域只有字符串一种形态，分流在 targets 层做；state 的值域有三形态（引号串/裸字母/数字），分流下沉到 state_token 内部。**分流位置由值域的形态数决定**：形态单一→外层分流；形态多样→下沉到 token 层内部分派
+
 ### console_add_led_index——去重与容量的合体
 
 ```c
@@ -239,7 +343,7 @@ console_apply_command(&command);   // ⑤ 执行
 console_report_result(&command);   // ⑥ 汇报
 ```
 
-- **① 补 '\0' 在写指针处**：handle_input_byte 保证 g_rx_length ≤ SIZE-1，所以 g_rx_buffer[g_rx_length] 不会越界——**两个函数共同维护的不变式**。行组装层负责「永不越界」，结算层负责「补终 0」，各管一半
+- **① 补 '\0' 在写指针处**：[[08_rocketpi_uart_control_led_3#console_handle_input_byte——行组装的门卫|handle_input_byte]] 保证 g_rx_length ≤ SIZE-1，所以 g_rx_buffer[g_rx_length] 不会越界——**两个函数共同维护的不变式**。行组装层负责「永不越界」，结算层负责「补终 0」，各管一半
 - **③ = {0} 清零**：count 字段必须从 0 起步，否则 add 函数的追加位置是随机值——「结构体使用前必须清零」在 C 里没有机制保证，靠初始化纪律
 - **④ 状态数量校验放这里**：它是唯一需要同时看 led_count 和 state_count 的规则，放哪个解析函数里都会造成不对称，编排层是它的家
 
@@ -297,7 +401,7 @@ for (size_t i = 0U; i < cmd->led_count; ++i)
                (message != NULL) ? message : "unknown");
 ```
 
-`(message != NULL) ? message : "unknown"`——入参可能为 NULL 的兜底翻译。**错误路径上再崩就是雪上加霜**，错误处理代码自身必须是最健壮的代码。160 字节容量：msg 最长约 22 字符 + 模板 34 字符，余量充足。
+`(message != NULL) ? message : "unknown"`——入参可能为 NULL 的兑底翻译。**错误路径上再崩就是雪上加霜**，错误处理代码自身必须是最健壮的代码。160 字节容量：msg 最长约 22 字符 + 模板 34 字符，余量充足。
 
 ### console_print_gpio_map——自描述输出
 
@@ -307,12 +411,12 @@ for (size_t i = 0U; i < cmd->led_count; ++i)
 
 | 类别 | 成员 | 复用价值 | 依赖 |
 |---|---|---|---|
-| I/O 网关 | send_string, send_prompt | 换硬件只改这 | HAL_UART，无业务 |
+| I/O 网关与行组装 | send_string, send_prompt, print_examples, handle_input_byte | 边界层，换硬件只改这 | HAL_UART，无业务 |
 | 字符串原语 | skip_spaces, str_case_equal, port_name, pin_index | 全项目通用 | libc ctype，无业务 |
-| 解析引擎 | find_json_value, parse_led_token, parse_state_token, add_led_index, find_led_by_token, process_buffer | 本协议专用 | 原语类 + 配置表 |
+| 解析引擎 | find_json_value, parse_led_token, parse_state_token, parse_led_targets, parse_state_values, add_led_index, find_led_by_token, process_buffer | 本协议专用 | 原语类 + 配置表 |
 | 执行汇报 | set_led_state, apply_command, report_result, report_error, print_gpio_map | 本业务专用 | 中间表示 + 网关 |
 
-依赖箭头严格从上往下、从左往右——**这就是这套代码可以独立测试的原理**：解析引擎用假 cmd 就能单测，不接硬件。
+21 个函数 4+4+8+5 全覆盖。依赖箭头严格从上往下、从左往右——**这就是这套代码可以独立测试的原理**：解析引擎用假 cmd 就能单测，不接硬件。
 
 ## 关联笔记
 
