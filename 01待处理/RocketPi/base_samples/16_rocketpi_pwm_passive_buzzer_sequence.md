@@ -173,12 +173,43 @@ buzzer_test_play_sequence(notes, length, gap_ms)
             └─▶ __HAL_TIM_SET_COMPARE(..., 0U)  // 清零 CCR
 ```
 
+### 音符数组结构
+
+**`buzzer_test_note_t` 数组**是序列播放的核心数据结构，每个元素代表一个音符：
+
+```c
+// 《欢乐颂》片段示例
+static const buzzer_test_note_t buzzer_song_ode_to_joy[] = {
+    //  { frequency_hz, duty_percent, duration_ms }
+    {   BUZZER_NOTE_E4, 0U, ODE_TO_JOY_DURATION(25U) },  // [0] mi, 200ms
+    {   BUZZER_NOTE_E4, 0U, ODE_TO_JOY_DURATION(25U) },  // [1] mi, 200ms
+    {   BUZZER_NOTE_F4, 0U, ODE_TO_JOY_DURATION(25U) },  // [2] fa, 200ms
+    {   BUZZER_NOTE_G4, 0U, ODE_TO_JOY_DURATION(25U) },  // [3] sol, 200ms
+    // ... 更多音符
+    {   0U,             0U, 300U                    },  // [n] 静音 300ms
+    // ...
+};
+
+#define BUZZER_SONG_ODE_TO_JOY_LENGTH  (sizeof(buzzer_song_ode_to_joy) / sizeof(buzzer_song_ode_to_joy[0]))
+```
+
+**数组遍历时的 gap_ms 作用**：`gap_ms` 参数控制的是**数组中相邻音符之间的静音间隔**，不是单个音符内部的间隔。
+
+```
+数组索引:    [0]         [1]         [2]         [3]
+音符:        E4          E4          F4          G4
+播放:        ├──200ms──┤  ├──200ms──┤  ├──200ms──┤  ├──200ms──┤
+间隔:              ↑gap_ms↑      ↑gap_ms↑      ↑gap_ms↑
+                   20ms          20ms          20ms
+```
+
 ### 时序控制逻辑
 
 ```c
 for (uint32_t i = 0U; i < length; ++i) {
+    // notes[i] 是数组中的第 i 个音符元素
     if (notes[i].frequency_hz == 0U) {
-        // 静音处理
+        // 静音处理：frequency_hz=0 表示休止符
         buzzer_test_stop();                           // 停止 PWM 输出
         HAL_Delay(notes[i].duration_ms);              // 静音时长
     } else {
@@ -187,8 +218,11 @@ for (uint32_t i = 0U; i < length; ++i) {
         HAL_Delay(notes[i].duration_ms);              // 播放时长（PWM 硬件持续输出）
         buzzer_test_stop();                           // 停止当前音符
     }
+
+    // 音符间间隔：当前 notes[i] 与下一个 notes[i+1] 之间的静音
+    // i + 1U < length 确保最后一个音符后不加间隔
     if (gap > 0U && i + 1U < length) {
-        HAL_Delay(gap);                               // 音符间间隔（静音）
+        HAL_Delay(gap);                               // 静音 gap_ms 毫秒
     }
 }
 ```
@@ -214,32 +248,6 @@ for (uint32_t i = 0U; i < length; ++i) {
 ```
 
 ## 应用层实现
-
-### 曲谱定义示例
-
-```c
-// 《欢乐颂》片段
-static const buzzer_test_note_t buzzer_song_ode_to_joy[] = {
-    { BUZZER_NOTE_E4, 0U, ODE_TO_JOY_DURATION(25U) },  // mi, 200ms
-    { BUZZER_NOTE_E4, 0U, ODE_TO_JOY_DURATION(25U) },  // mi, 200ms
-    { BUZZER_NOTE_F4, 0U, ODE_TO_JOY_DURATION(25U) },  // fa, 200ms
-    { BUZZER_NOTE_G4, 0U, ODE_TO_JOY_DURATION(25U) },  // sol, 200ms
-    { BUZZER_NOTE_G4, 0U, ODE_TO_JOY_DURATION(25U) },  // sol, 200ms
-    { BUZZER_NOTE_F4, 0U, ODE_TO_JOY_DURATION(25U) },  // fa, 200ms
-    { BUZZER_NOTE_E4, 0U, ODE_TO_JOY_DURATION(25U) },  // mi, 200ms
-    { BUZZER_NOTE_D4, 0U, ODE_TO_JOY_DURATION(25U) },  // re, 200ms
-    { BUZZER_NOTE_C4, 0U, ODE_TO_JOY_DURATION(25U) },  // do, 200ms
-    { BUZZER_NOTE_C4, 0U, ODE_TO_JOY_DURATION(25U) },  // do, 200ms
-    { BUZZER_NOTE_D4, 0U, ODE_TO_JOY_DURATION(25U) },  // re, 200ms
-    { BUZZER_NOTE_E4, 0U, ODE_TO_JOY_DURATION(25U) },  // mi, 200ms
-    { BUZZER_NOTE_E4, 0U, ODE_TO_JOY_DURATION(36U) },  // mi, 288ms（附点）
-    { BUZZER_NOTE_D4, 0U, ODE_TO_JOY_DURATION(12U) },  // re, 96ms（八分）
-    { BUZZER_NOTE_D4, 0U, ODE_TO_JOY_DURATION(50U) },  // re, 400ms（二分）
-    // ... 更多音符
-};
-
-#define BUZZER_SONG_ODE_TO_JOY_LENGTH  (sizeof(buzzer_song_ode_to_joy) / sizeof(buzzer_song_ode_to_joy[0]))
-```
 
 ### main.c 调用示例
 
